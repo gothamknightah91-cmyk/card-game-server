@@ -1,3 +1,4 @@
+
 const express = require("express");
 const http = require("http");
 const WebSocket = require("ws");
@@ -51,30 +52,6 @@ function broadcast(room, obj) {
 }
 
 /* =====================
-   ТОЧКУВАНЕ
-===================== */
-function scoreNegative(room, winner) {
-  let score = 0;
-  const g = room.gameIndex;
-  const lastTwo = room.trickCount >= 11;
-
-  room.table.forEach(t => {
-    const suit = t.card[0];
-    const rank = t.card.slice(1);
-
-    if ((g === 0 || g === 6) && suit === "♥") score -= 2;
-    if ((g === 2 || g === 6) && (rank === "J" || rank === "K")) score -= 3;
-    if ((g === 3 || g === 6) && rank === "Q") score -= 7;
-    if ((g === 4 || g === 6) && t.card === "♥K") score -= 18;
-  });
-
-  if (g === 1 || g === 6) score -= 2;
-  if ((g === 5 || g === 6) && lastTwo) score -= 17;
-
-  room.scores[winner] += score;
-}
-
-/* =====================
    РАЗДАВАНЕ
 ===================== */
 function deal(room) {
@@ -112,32 +89,49 @@ wss.on("connection", ws => {
     let data;
     try { data = JSON.parse(msg); } catch { return; }
 
-    /* ===== JOIN ===== */
-    if (data.type === "join") {
+    /* ===== CREATE ROOM ===== */
+    if (data.type === "CREATE_ROOM") {
       ws.name = data.name;
       ws.room = data.room;
 
-      if (!rooms[ws.room]) {
-        rooms[ws.room] = {
-          players: [],
-          hands: {},
-          scores: {},
-          table: [],
-          leadSuit: null,
-          turn: 0,
-          trickCount: 0,
-          gameIndex: 0
-        };
+      rooms[ws.room] = {
+        players: [],
+        hands: {},
+        scores: {},
+        table: [],
+        leadSuit: null,
+        turn: 0,
+        trickCount: 0,
+        gameIndex: 0
+      };
+
+      rooms[ws.room].players.push(ws);
+      rooms[ws.room].scores[ws.name] = 0;
+
+      ws.send(JSON.stringify({
+        type: "PLAYER_JOINED",
+        count: 1
+      }));
+      return;
+    }
+
+    /* ===== JOIN ROOM ===== */
+    if (data.type === "JOIN_ROOM") {
+      const room = rooms[data.room];
+      if (!room || room.players.length >= 4) {
+        ws.send(JSON.stringify({ type: "ROOM_FULL" }));
+        return;
       }
 
-      const room = rooms[ws.room];
+      ws.name = data.name;
+      ws.room = data.room;
+
       room.players.push(ws);
       room.scores[ws.name] = 0;
 
       broadcast(room, {
-        type: "chat",
-        name: "Система",
-        text: `${ws.name} влезе`
+        type: "PLAYER_JOINED",
+        count: room.players.length
       });
 
       if (room.players.length === 4) {
@@ -159,14 +153,10 @@ wss.on("connection", ws => {
       return;
     }
 
-    /* =====================
-       ИГРА НА КАРТА
-    ===================== */
+    /* ===== ИГРА ===== */
     if (data.type === "play") {
       const room = rooms[ws.room];
       if (!room) return;
-
-      // ред ли му е
       if (room.players[room.turn] !== ws) return;
 
       const card = data.card;
@@ -174,19 +164,13 @@ wss.on("connection", ws => {
       if (!hand || !hand.includes(card)) return;
 
       const suit = card[0];
-
-      // ✅ ЗАДЪЛЖИТЕЛНО ОТГОВАРЯНЕ НА БОЯ
       if (room.leadSuit) {
         const hasSuit = hand.some(c => c[0] === room.leadSuit);
-        if (hasSuit && suit !== room.leadSuit) {
-          // ❗ просто отказваме – клиентът НЕ маха карта
-          return;
-        }
+        if (hasSuit && suit !== room.leadSuit) return;
       }
 
       if (!room.leadSuit) room.leadSuit = suit;
 
-      // махаме картата САМО ТУК
       room.hands[ws.name] = hand.filter(c => c !== card);
       room.table.push({ player: ws.name, card });
 
@@ -205,7 +189,6 @@ wss.on("connection", ws => {
         return;
       }
 
-      /* ===== КОЙ ПЕЧЕЛИ ===== */
       let win = room.table[0];
       room.table.forEach(t => {
         if (t.card[0] === win.card[0] && power(t.card) > power(win.card)) {
@@ -213,19 +196,10 @@ wss.on("connection", ws => {
         }
       });
 
-      scoreNegative(room, win.player);
-
-      broadcast(room, {
-        type: "scores",
-        scores: room.scores
-      });
-
       room.turn = room.players.findIndex(p => p.name === win.player);
       room.table = [];
       room.leadSuit = null;
       room.trickCount++;
-
-      broadcast(room, { type: "clearTable" });
 
       if (room.trickCount === 13) {
         room.gameIndex++;

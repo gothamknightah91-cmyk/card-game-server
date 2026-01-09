@@ -1,4 +1,3 @@
-
 const express = require("express");
 const http = require("http");
 const WebSocket = require("ws");
@@ -137,6 +136,18 @@ wss.on("connection", ws => {
       if (room.players.length === 4) {
         deal(room);
       }
+      return;
+    }
+
+    /* ===== GAME EVENT (START GAME) ===== */
+    if (data.type === "GAME_EVENT") {
+      const room = rooms[data.room];
+      if (!room) return;
+
+      broadcast(room, {
+        type: "GAME_EVENT",
+        event: data.event
+      });
       return;
     }
 

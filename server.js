@@ -117,10 +117,15 @@ wss.on("connection", ws => {
     /* ===== JOIN ROOM ===== */
     if (data.type === "JOIN_ROOM") {
       const room = rooms[data.room];
-      if (!room || room.players.length >= 4) {
-        ws.send(JSON.stringify({ type: "ROOM_FULL" }));
-        return;
-      }
+      if (room.players.length === 4) {
+  broadcast(room, {
+    type: "GAME_EVENT",
+    event: { action: "START_GAME" }
+  });
+
+  deal(room);
+}
+
 
       ws.name = data.name;
       ws.room = data.room;
@@ -235,3 +240,4 @@ const PORT = process.env.PORT || 8080;
 server.listen(PORT, "0.0.0.0", () => {
   console.log("Сървърът работи на порт", PORT);
 });
+

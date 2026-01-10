@@ -219,6 +219,8 @@ if (data.type === "JOIN_ROOM") {
       room.table = [];
       room.leadSuit = null;
       room.trickCount++;
+      broadcast(room, { type: "clearTable" });
+
 
       if (room.trickCount === 13) {
         room.gameIndex++;
@@ -243,5 +245,6 @@ const PORT = process.env.PORT || 8080;
 server.listen(PORT, "0.0.0.0", () => {
   console.log("Сървърът работи на порт", PORT);
 });
+
 
 

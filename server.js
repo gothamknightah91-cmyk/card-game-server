@@ -115,47 +115,32 @@ wss.on("connection", ws => {
     }
 
     /* ===== JOIN ROOM ===== */
-    /* ===== JOIN ROOM ===== */
-if (data.type === "JOIN_ROOM") {
-  const room = rooms[data.room];
-  if (!room || room.players.length >= 4) {
-    ws.send(JSON.stringify({ type: "ROOM_FULL" }));
-    return;
-  }
-
-  ws.name = data.name;
-  ws.room = data.room;
-
-  room.players.push(ws);
-  room.scores[ws.name] = 0;
-
-  broadcast(room, {
-    type: "PLAYER_JOINED",
-    count: room.players.length
-  });
-
-  // ✅ AUTO START ПРИ 4 ИГРАЧА
-  if (room.players.length === 4) {
-    broadcast(room, {
-      type: "GAME_EVENT",
-      event: { action: "START_GAME" }
-    });
-
-    deal(room);
-  }
-
-  return;
-}
-
-    /* ===== GAME EVENT (START GAME) ===== */
-    if (data.type === "GAME_EVENT") {
+    if (data.type === "JOIN_ROOM") {
       const room = rooms[data.room];
-      if (!room) return;
+      if (!room || room.players.length >= 4) {
+        ws.send(JSON.stringify({ type: "ROOM_FULL" }));
+        return;
+      }
+
+      ws.name = data.name;
+      ws.room = data.room;
+
+      room.players.push(ws);
+      room.scores[ws.name] = 0;
 
       broadcast(room, {
-        type: "GAME_EVENT",
-        event: data.event
+        type: "PLAYER_JOINED",
+        count: room.players.length
       });
+
+      // AUTO START ПРИ 4 ИГРАЧА
+      if (room.players.length === 4) {
+        broadcast(room, {
+          type: "GAME_EVENT",
+          event: { action: "START_GAME" }
+        });
+        deal(room);
+      }
       return;
     }
 
@@ -199,6 +184,7 @@ if (data.type === "JOIN_ROOM") {
         card
       });
 
+      // ако още няма 4 карти
       if (room.table.length < 4) {
         room.turn = (room.turn + 1) % 4;
         broadcast(room, {
@@ -208,6 +194,7 @@ if (data.type === "JOIN_ROOM") {
         return;
       }
 
+      // ===== КОЙ ПЕЧЕЛИ РЪКАТА =====
       let win = room.table[0];
       room.table.forEach(t => {
         if (t.card[0] === win.card[0] && power(t.card) > power(win.card)) {
@@ -216,11 +203,14 @@ if (data.type === "JOIN_ROOM") {
       });
 
       room.turn = room.players.findIndex(p => p.name === win.player);
+
+      // 🔥 ПЪРВО ЧИСТИМ МАСАТА ПРИ КЛИЕНТА
+      broadcast(room, { type: "clearTable" });
+
+      // ПОСЛЕ ЛОГИКАТА
       room.table = [];
       room.leadSuit = null;
       room.trickCount++;
-      broadcast(room, { type: "clearTable" });
-
 
       if (room.trickCount === 13) {
         room.gameIndex++;
@@ -245,6 +235,3 @@ const PORT = process.env.PORT || 8080;
 server.listen(PORT, "0.0.0.0", () => {
   console.log("Сървърът работи на порт", PORT);
 });
-
-
-

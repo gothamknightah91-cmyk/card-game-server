@@ -115,34 +115,37 @@ wss.on("connection", ws => {
     }
 
     /* ===== JOIN ROOM ===== */
-    if (data.type === "JOIN_ROOM") {
-      const room = rooms[data.room];
-      if (room.players.length === 4) {
+    /* ===== JOIN ROOM ===== */
+if (data.type === "JOIN_ROOM") {
+  const room = rooms[data.room];
+  if (!room || room.players.length >= 4) {
+    ws.send(JSON.stringify({ type: "ROOM_FULL" }));
+    return;
+  }
+
+  ws.name = data.name;
+  ws.room = data.room;
+
+  room.players.push(ws);
+  room.scores[ws.name] = 0;
+
   broadcast(room, {
-    type: "GAME_EVENT",
-    event: { action: "START_GAME" }
+    type: "PLAYER_JOINED",
+    count: room.players.length
   });
 
-  deal(room);
+  // ✅ AUTO START ПРИ 4 ИГРАЧА
+  if (room.players.length === 4) {
+    broadcast(room, {
+      type: "GAME_EVENT",
+      event: { action: "START_GAME" }
+    });
+
+    deal(room);
+  }
+
+  return;
 }
-
-
-      ws.name = data.name;
-      ws.room = data.room;
-
-      room.players.push(ws);
-      room.scores[ws.name] = 0;
-
-      broadcast(room, {
-        type: "PLAYER_JOINED",
-        count: room.players.length
-      });
-
-      if (room.players.length === 4) {
-        deal(room);
-      }
-      return;
-    }
 
     /* ===== GAME EVENT (START GAME) ===== */
     if (data.type === "GAME_EVENT") {
@@ -240,4 +243,5 @@ const PORT = process.env.PORT || 8080;
 server.listen(PORT, "0.0.0.0", () => {
   console.log("Сървърът работи на порт", PORT);
 });
+
 

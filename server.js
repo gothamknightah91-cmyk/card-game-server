@@ -133,6 +133,19 @@ wss.on("connection", ws => {
     const room = rooms[ws.room];
     if (!room) return;
 
+    /* ===== CHAT ===== */
+if (data.type === "chat") {
+  if (!data.text || !data.name) return;
+
+  broadcast(room, {
+    type: "chat",
+    name: data.name,
+    text: data.text
+  });
+  return;
+}
+
+
     /* ===== TRUMP ===== */
     if (data.type === "SET_TRUMP" && room.phase === 2) {
       room.trumpSuit = data.suit;
@@ -220,3 +233,4 @@ wss.on("connection", ws => {
 server.listen(process.env.PORT || 8080, () =>
   console.log("Server running")
 );
+

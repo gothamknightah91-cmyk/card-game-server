@@ -1,7 +1,6 @@
 const express = require("express");
 const http = require("http");
 const WebSocket = require("ws");
-const crypto = require("crypto");
 
 const app = express();
 app.use(express.static("client"));
@@ -9,7 +8,6 @@ app.use(express.static("client"));
 const server = http.createServer(app);
 const wss = new WebSocket.Server({ server });
 
-/* ================== CONSTANTS ================== */
 const suits = ["♠","♥","♦","♣"];
 const ranks = ["2","3","4","5","6","7","8","9","10","J","Q","K","A"];
 
@@ -20,9 +18,8 @@ const GAME_NAMES = [
 
 const rooms = {};
 
-/* ================== HELPERS ================== */
+/* ================= HELPERS ================= */
 const power = c => ranks.indexOf(c.slice(1));
-const uid = () => crypto.randomUUID();
 
 function createDeck() {
   return suits.flatMap(s => ranks.map(r => s + r))
@@ -35,57 +32,55 @@ function send(ws, obj) {
 }
 
 function broadcast(room, obj) {
-  [...room.players, ...room.spectators].forEach(p => send(p.ws, obj));
+  [...room.players, ...room.spectators]
+    .forEach(p => send(p.ws, obj));
 }
 
-/* ================== ROOM ================== */
-function createRoom(code) {
-  rooms[code] = {
-    code,
-    players: [],
-    spectators: [],
-    hands: {},
-    scores: {},
-    table: [],
-    phase: 1,
-    gameIndex: 0,
-    trumpSuit: null,
-    turn: 0,
-    trick: 0,
-    solitaireRound: 1,
-    finished: []
-  };
+/* ================= ROOM ================= */
+function getRoom(code) {
+  if (!rooms[code]) {
+    rooms[code] = {
+      players: [],
+      spectators: [],
+      hands: {},
+      scores: {},
+      table: [],
+      phase: 1,
+      gameIndex: 0,
+      turn: 0,
+      trick: 0,
+      started: false
+    };
+  }
+  return rooms[code];
 }
 
-/* ================== DEAL ================== */
-function deal(room, open = false) {
+/* ================= DEAL ================= */
+function deal(room) {
   const deck = createDeck();
   room.table = [];
   room.trick = 0;
 
   room.players.forEach((p, i) => {
-    room.hands[p.id] = deck.slice(i * 13, (i + 1) * 13);
+    room.hands[p.name] = deck.slice(i * 13, (i + 1) * 13);
     send(p.ws, {
-      type: "HAND",
-      cards: room.hands[p.id],
-      open
+      type: "hand",
+      cards: room.hands[p.name]
     });
   });
 
   broadcast(room, {
-    type: "STATUS",
-    text: room.phase === 1 ? GAME_NAMES[room.gameIndex] :
-          room.phase === 2 ? "Игра с коз" :
-          "Пасианс"
+    type: "game",
+    text: GAME_NAMES[room.gameIndex]
   });
 
   broadcast(room, {
-    type: "TURN",
+    type: "turn",
     player: room.players[room.turn].name
   });
 }
 
-/* ================== WS ================== */
+/* ================= WS ================= */
 wss.on("connection", ws => {
   ws.isAlive = true;
   ws.on("pong", () => ws.isAlive = true);
@@ -94,38 +89,33 @@ wss.on("connection", ws => {
     let data;
     try { data = JSON.parse(msg); } catch { return; }
 
-    /* ===== CONNECT ===== */
-    if (data.type === "CONNECT") {
-      if (!rooms[data.room]) createRoom(data.room);
-      const room = rooms[data.room];
+    /* ===== CREATE / JOIN ===== */
+    if (data.type === "CREATE_ROOM" || data.type === "JOIN_ROOM") {
+      const room = getRoom(data.room);
 
-      let user = room.players.find(p => p.id === data.playerId) ||
-                 room.spectators.find(p => p.id === data.playerId);
-
-      if (user) {
-        user.ws = ws;
-        send(ws, { type:"RECONNECTED" });
-      } else {
-        user = {
-          id: data.playerId || uid(),
-          name: data.name,
-          ws
-        };
-        if (room.players.length < 4) {
-          room.players.push(user);
-          room.scores[user.id] = 0;
-        } else {
-          room.spectators.push(user);
-        }
-      }
-
-      ws.user = user;
+      ws.name = data.name;
       ws.room = room;
 
+      const exists = room.players.find(p => p.name === ws.name);
+
+      if (exists) {
+        exists.ws = ws; // reconnection
+      } else if (room.players.length < 4) {
+        room.players.push(ws);
+        room.scores[ws.name] = room.scores[ws.name] || 0;
+      } else {
+        room.spectators.push(ws);
+        send(ws, { type:"SPECTATOR" });
+      }
+
       broadcast(room, {
-        type: "ROOM_INFO",
-        players: room.players.map(p => p.name),
-        spectators: room.spectators.length
+        type:"PLAYER_JOINED",
+        count: room.players.length
+      });
+
+      broadcast(room, {
+        type:"SPECTATORS",
+        count: room.spectators.length
       });
 
       if (room.players.length === 4 && !room.started) {
@@ -139,35 +129,35 @@ wss.on("connection", ws => {
     if (!room) return;
 
     /* ===== CHAT ===== */
-    if (data.type === "CHAT") {
+    if (data.type === "chat") {
       broadcast(room, {
-        type:"CHAT",
-        name: ws.user.name,
+        type:"chat",
+        name: ws.name,
         text: data.text
       });
+      return;
     }
 
     /* ===== PLAY ===== */
-    if (data.type === "PLAY") {
-      const pIndex = room.players.findIndex(p => p.id === ws.user.id);
-      if (pIndex !== room.turn) return;
+    if (data.type === "play") {
+      if (room.players[room.turn] !== ws) return;
 
-      const hand = room.hands[ws.user.id];
+      const hand = room.hands[ws.name];
       if (!hand.includes(data.card)) return;
 
-      room.hands[ws.user.id] = hand.filter(c => c !== data.card);
-      room.table.push({ player: ws.user, card: data.card });
+      room.hands[ws.name] = hand.filter(c => c !== data.card);
+      room.table.push({ player: ws.name, card: data.card });
 
       broadcast(room, {
-        type:"PLAYED",
-        player: ws.user.name,
+        type:"played",
+        player: ws.name,
         card: data.card
       });
 
       if (room.table.length < 4) {
         room.turn = (room.turn + 1) % 4;
         broadcast(room, {
-          type:"TURN",
+          type:"turn",
           player: room.players[room.turn].name
         });
         return;
@@ -181,25 +171,32 @@ wss.on("connection", ws => {
         ) win = t;
       });
 
-      room.scores[win.player.id] -= 2;
-      broadcast(room, { type:"SCORES", scores:room.scores });
+      room.scores[win.player] -= 2;
 
-      room.turn = room.players.findIndex(p => p.id === win.player.id);
+      broadcast(room, { type:"scores", scores:room.scores });
+      broadcast(room, { type:"clearTable" });
+
+      room.turn = room.players.findIndex(p => p.name === win.player);
       room.table = [];
-      broadcast(room, { type:"CLEAR" });
+      room.trick++;
 
-      if (++room.trick === 13) {
+      if (room.trick === 13) {
         room.gameIndex++;
         if (room.gameIndex < 7) deal(room);
-        else broadcast(room,{ type:"GAME_OVER", scores:room.scores });
+        else broadcast(room, { type:"GAME_OVER", scores:room.scores });
       } else {
-        broadcast(room,{ type:"TURN", player:room.players[room.turn].name });
+        broadcast(room, {
+          type:"turn",
+          player: room.players[room.turn].name
+        });
       }
     }
   });
 
   ws.on("close", () => {
-    if (ws.user) ws.user.disconnected = true;
+    if (!ws.room) return;
+    ws.room.spectators =
+      ws.room.spectators.filter(s => s !== ws);
   });
 });
 

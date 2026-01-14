@@ -1,6 +1,7 @@
 const express = require("express");
 const http = require("http");
 const WebSocket = require("ws");
+const crypto = require("crypto");
 
 const app = express();
 app.use(express.static("client"));
@@ -8,211 +9,207 @@ app.use(express.static("client"));
 const server = http.createServer(app);
 const wss = new WebSocket.Server({ server });
 
+/* ================== CONSTANTS ================== */
 const suits = ["♠","♥","♦","♣"];
 const ranks = ["2","3","4","5","6","7","8","9","10","J","Q","K","A"];
 
 const GAME_NAMES = [
-  "Без купи",
-  "Без ръце",
-  "Без мъже",
-  "Без дами",
-  "Без поп купа",
-  "Без последни 2 ръце",
-  "Без всичко"
+  "Без купи","Без ръце","Без мъже","Без дами",
+  "Без поп купа","Без последни 2 ръце","Без всичко"
 ];
 
 const rooms = {};
 
-/* =====================
-   HELPERS
-===================== */
+/* ================== HELPERS ================== */
 const power = c => ranks.indexOf(c.slice(1));
+const uid = () => crypto.randomUUID();
 
-const createDeck = () =>
-  suits.flatMap(s => ranks.map(r => s + r))
-       .sort(() => Math.random() - 0.5);
+function createDeck() {
+  return suits.flatMap(s => ranks.map(r => s + r))
+    .sort(() => Math.random() - 0.5);
+}
+
+function send(ws, obj) {
+  if (ws.readyState === WebSocket.OPEN)
+    ws.send(JSON.stringify(obj));
+}
 
 function broadcast(room, obj) {
-  room.players.forEach(p => {
-    if (p.readyState === WebSocket.OPEN) {
-      p.send(JSON.stringify(obj));
-    }
-  });
+  [...room.players, ...room.spectators].forEach(p => send(p.ws, obj));
 }
 
-function error(ws, msg) {
-  ws.send(JSON.stringify({ type:"ERROR", message: msg }));
+/* ================== ROOM ================== */
+function createRoom(code) {
+  rooms[code] = {
+    code,
+    players: [],
+    spectators: [],
+    hands: {},
+    scores: {},
+    table: [],
+    phase: 1,
+    gameIndex: 0,
+    trumpSuit: null,
+    turn: 0,
+    trick: 0,
+    solitaireRound: 1,
+    finished: []
+  };
 }
 
-/* =====================
-   SCORING
-===================== */
-function scoreTrick(room, winner, cards, isLast) {
-  let pts = 0;
-  const g = room.gameIndex;
-
-  if (room.phase === 2) {
-    pts = 5;
-  } else if (room.phase === 1) {
-    if ((g === 0 || g === 6)) pts += cards.filter(c => c[0] === "♥").length * -2;
-    if ((g === 1 || g === 6)) pts += -2;
-    if ((g === 2 || g === 6)) pts += cards.filter(c => ["J","K"].includes(c.slice(1))).length * -3;
-    if ((g === 3 || g === 6)) pts += cards.filter(c => c.slice(1) === "Q").length * -7;
-    if ((g === 4 || g === 6) && cards.includes("♥K")) pts += -18;
-    if ((g === 5 || g === 6) && isLast) pts += -17;
-  }
-
-  room.scores[winner] += pts;
-}
-
-/* =====================
-   DEAL
-===================== */
-function deal(room) {
+/* ================== DEAL ================== */
+function deal(room, open = false) {
   const deck = createDeck();
   room.table = [];
-  room.leadSuit = null;
-  room.trickCount = 0;
+  room.trick = 0;
 
   room.players.forEach((p, i) => {
-    room.hands[p.name] = deck.slice(i * 13, (i + 1) * 13);
-    p.send(JSON.stringify({ type:"hand", cards: room.hands[p.name] }));
+    room.hands[p.id] = deck.slice(i * 13, (i + 1) * 13);
+    send(p.ws, {
+      type: "HAND",
+      cards: room.hands[p.id],
+      open
+    });
   });
 
-  if (room.phase === 1)
-    broadcast(room, { type:"game", text: GAME_NAMES[room.gameIndex] });
+  broadcast(room, {
+    type: "STATUS",
+    text: room.phase === 1 ? GAME_NAMES[room.gameIndex] :
+          room.phase === 2 ? "Игра с коз" :
+          "Пасианс"
+  });
 
-  if (room.phase === 2)
-    broadcast(room, { type:"TRUMP_SELECT", player: room.players[room.trumpCaller].name });
-
-  broadcast(room, { type:"turn", player: room.players[room.turn].name });
+  broadcast(room, {
+    type: "TURN",
+    player: room.players[room.turn].name
+  });
 }
 
-/* =====================
-   WEBSOCKET
-===================== */
+/* ================== WS ================== */
 wss.on("connection", ws => {
+  ws.isAlive = true;
+  ws.on("pong", () => ws.isAlive = true);
 
   ws.on("message", msg => {
     let data;
     try { data = JSON.parse(msg); } catch { return; }
 
-    /* ===== CREATE ===== */
-    if (data.type === "CREATE_ROOM") {
-      rooms[data.room] = {
-        players:[ws],
-        hands:{},
-        scores:{ [data.name]:0 },
-        phase:1,
-        gameIndex:0,
-        trumpSuit:null,
-        trumpCaller:0,
-        trickCount:0,
-        table:[],
-        leadSuit:null,
-        turn:0
-      };
-      ws.name = data.name;
-      ws.room = data.room;
-      ws.send(JSON.stringify({ type:"PLAYER_JOINED", count:1 }));
-      return;
-    }
-
-    /* ===== JOIN ===== */
-    if (data.type === "JOIN_ROOM") {
+    /* ===== CONNECT ===== */
+    if (data.type === "CONNECT") {
+      if (!rooms[data.room]) createRoom(data.room);
       const room = rooms[data.room];
-      if (!room) return error(ws,"Стаята не съществува");
-      if (room.players.length === 4) return error(ws,"Стаята е пълна");
 
-      ws.name = data.name;
-      ws.room = data.room;
-      room.players.push(ws);
-      room.scores[ws.name] = 0;
+      let user = room.players.find(p => p.id === data.playerId) ||
+                 room.spectators.find(p => p.id === data.playerId);
 
-      broadcast(room,{ type:"PLAYER_JOINED", count:room.players.length });
-      if (room.players.length === 4) deal(room);
+      if (user) {
+        user.ws = ws;
+        send(ws, { type:"RECONNECTED" });
+      } else {
+        user = {
+          id: data.playerId || uid(),
+          name: data.name,
+          ws
+        };
+        if (room.players.length < 4) {
+          room.players.push(user);
+          room.scores[user.id] = 0;
+        } else {
+          room.spectators.push(user);
+        }
+      }
+
+      ws.user = user;
+      ws.room = room;
+
+      broadcast(room, {
+        type: "ROOM_INFO",
+        players: room.players.map(p => p.name),
+        spectators: room.spectators.length
+      });
+
+      if (room.players.length === 4 && !room.started) {
+        room.started = true;
+        deal(room);
+      }
       return;
     }
 
-    const room = rooms[ws.room];
+    const room = ws.room;
     if (!room) return;
 
     /* ===== CHAT ===== */
-    if (data.type === "chat") {
-      if (!data.text) return;
-      broadcast(room,{ type:"chat", name:data.name, text:data.text });
-      return;
-    }
-
-    /* ===== SET TRUMP ===== */
-    if (data.type === "SET_TRUMP" && room.phase === 2) {
-      room.trumpSuit = data.suit;
-      broadcast(room,{ type:"TRUMP_SET", suit:data.suit });
-      deal(room);
-      return;
+    if (data.type === "CHAT") {
+      broadcast(room, {
+        type:"CHAT",
+        name: ws.user.name,
+        text: data.text
+      });
     }
 
     /* ===== PLAY ===== */
-    if (data.type === "play") {
-      if (room.players[room.turn] !== ws)
-        return error(ws,"Не си на ход");
+    if (data.type === "PLAY") {
+      const pIndex = room.players.findIndex(p => p.id === ws.user.id);
+      if (pIndex !== room.turn) return;
 
-      const hand = room.hands[ws.name];
-      if (!hand || !hand.includes(data.card))
-        return error(ws,"Нямаш тази карта");
+      const hand = room.hands[ws.user.id];
+      if (!hand.includes(data.card)) return;
 
-      if (room.leadSuit) {
-        const hasSuit = hand.some(c => c[0] === room.leadSuit);
-        if (hasSuit && data.card[0] !== room.leadSuit)
-          return error(ws,"Трябва да отговориш на боя");
-      }
+      room.hands[ws.user.id] = hand.filter(c => c !== data.card);
+      room.table.push({ player: ws.user, card: data.card });
 
-      if (!room.leadSuit) room.leadSuit = data.card[0];
-
-      room.hands[ws.name] = hand.filter(c => c !== data.card);
-      room.table.push({ player: ws.name, card: data.card });
-
-      broadcast(room,{ type:"played", player:ws.name, card:data.card });
+      broadcast(room, {
+        type:"PLAYED",
+        player: ws.user.name,
+        card: data.card
+      });
 
       if (room.table.length < 4) {
         room.turn = (room.turn + 1) % 4;
-        broadcast(room,{ type:"turn", player:room.players[room.turn].name });
+        broadcast(room, {
+          type:"TURN",
+          player: room.players[room.turn].name
+        });
         return;
       }
 
       let win = room.table[0];
       room.table.forEach(t => {
-        const trump = room.phase === 2 && t.card[0] === room.trumpSuit;
-        const winTrump = room.phase === 2 && win.card[0] === room.trumpSuit;
-        if ((trump && !winTrump) ||
-            (t.card[0] === win.card[0] && power(t.card) > power(win.card)))
-          win = t;
+        if (
+          t.card[0] === win.card[0] &&
+          power(t.card) > power(win.card)
+        ) win = t;
       });
 
-      scoreTrick(room, win.player, room.table.map(x=>x.card), room.trickCount >= 11);
-      broadcast(room,{ type:"scores", scores:room.scores });
-      broadcast(room,{ type:"clearTable" });
+      room.scores[win.player.id] -= 2;
+      broadcast(room, { type:"SCORES", scores:room.scores });
 
-      room.turn = room.players.findIndex(p => p.name === win.player);
-      room.trickCount++;
+      room.turn = room.players.findIndex(p => p.id === win.player.id);
       room.table = [];
-      room.leadSuit = null;
+      broadcast(room, { type:"CLEAR" });
 
-      if (room.trickCount === 13) {
-        if (room.phase === 1 && room.gameIndex < 6) {
-          room.gameIndex++;
-        } else if (room.phase === 1) {
-          room.phase = 2;
-        }
-        deal(room);
-        return;
+      if (++room.trick === 13) {
+        room.gameIndex++;
+        if (room.gameIndex < 7) deal(room);
+        else broadcast(room,{ type:"GAME_OVER", scores:room.scores });
+      } else {
+        broadcast(room,{ type:"TURN", player:room.players[room.turn].name });
       }
-
-      broadcast(room,{ type:"turn", player:room.players[room.turn].name });
     }
+  });
+
+  ws.on("close", () => {
+    if (ws.user) ws.user.disconnected = true;
   });
 });
 
-server.listen(process.env.PORT || 8080, () =>
-  console.log("Server running")
-);
+/* ===== HEARTBEAT ===== */
+setInterval(() => {
+  wss.clients.forEach(ws => {
+    if (!ws.isAlive) return ws.terminate();
+    ws.isAlive = false;
+    ws.ping();
+  });
+}, 30000);
+
+server.listen(8080, () => console.log("Server running on 8080"));
